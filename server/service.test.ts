@@ -55,6 +55,16 @@ describe('routine assignment', () => {
   });
 });
 
+describe('read model', () => {
+  it('list and detail return the same task projection', () => {
+    const id = svc.createTask({ title: 'Shape', expertise: 'finance', scenario: 'never' });
+    const fromList = svc.getState().tasks.find((t) => t.id === id)!;
+    const fromDetail = task(id).task;
+    expect(fromDetail).toEqual(fromList);
+    expect(fromDetail.liveAttempts).toHaveLength(1);
+  });
+});
+
 describe('unresolved routing', () => {
   it('a request that never returns leaves the task routing indefinitely (no silent timeout)', () => {
     const id = svc.createTask({ title: 'Urgent', expertise: 'healthcare', priority: 'high', scenario: 'never' });
@@ -66,8 +76,8 @@ describe('unresolved routing', () => {
 
 describe('hedging with controlled rng', () => {
   it('second request wins; first returns later and is logged late_ignored', () => {
-    // rng draws: #1 slow_match pick (0.5 => Ben); #2 random: 0.5 not-never, 0 delay=5s, 0.5 not-no-match, 0 pick Ana
-    const seq = [0.5, 0.5, 0, 0.5, 0];
+    // #1 slow_match picks first eligible (no rng). #2 random draws: 0.5 not-never, 0 delay=5s, 0.5 not-no-match, 0.5 pick Ben
+    const seq = [0.5, 0, 0.5, 0.5];
     svc = new RoutingService(db, { now: () => clock, rng: () => seq.shift() ?? 0 });
     const id = svc.createTask({ title: 'Hedge', expertise: 'finance', scenario: 'slow_match' }); // 19s; pick uses rng => 0.5 => Ben
     advance(2_000);
@@ -77,6 +87,7 @@ describe('hedging with controlled rng', () => {
     let t = task(id);
     expect(t.task.state).toBe('offered');
     expect(states(id)).toEqual(['abandoned', 'applied']);
+    expect(t.assignments[0].contributor_id).toBe(ben);
     advance(20_000); // #1 finally answers
     t = task(id);
     expect(states(id)).toEqual(['late_ignored', 'applied']);
@@ -153,10 +164,21 @@ describe('recovery', () => {
     let t = task(id);
     expect(t.task).toMatchObject({ state: 'needs_attention', reason: 'declined' });
     expect(t.assignments[0]).toMatchObject({ status: 'declined', reason: 'conflict of interest' });
-    // Ana is free again, so she is eligible again; operator picks Ben explicitly instead.
+    // Operator recovers by picking someone else directly.
     svc.assign(id, ben, t.task.version);
     t = task(id);
     expect(t.assignments.map((a) => a.status)).toEqual(['declined', 'offered']);
+  });
+
+  it('retry after a decline does not send the decliner back to the engine', () => {
+    const id = svc.createTask({ title: 'Recover', expertise: 'finance', scenario: 'fast_match' }); // Ana
+    advance(5_000);
+    svc.respond(task(id).assignments[0].id, 'decline');
+    svc.retry(id, task(id).task.version);
+    const t = task(id);
+    expect(t.attempts[1].eligible.map((e) => e.id)).toEqual([ben]);
+    expect(t.events.at(-1)!.message).toMatch(/excluded Ana: already refused/);
+    expect(t.candidates.find((c) => c.id === ana)).toMatchObject({ busy: false, refused: true });
   });
 
   it('fail after accept but before start → needs_attention', () => {

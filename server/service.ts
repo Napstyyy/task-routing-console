@@ -107,11 +107,13 @@ export interface Fate {
  */
 export function planFate(scenario: Scenario, eligible: number[], now: number, rng: () => number): Fate {
   const pick = () => eligible[Math.floor(rng() * eligible.length)] ?? null;
+  // Forced scenarios pick deterministically (first eligible) so scripted demos never collide by chance.
+  const first = eligible[0] ?? null;
   switch (scenario) {
     case 'fast_match':
-      return { returnsAt: now + 5_000, outcome: pick(), label: 'fast match (5s)' };
+      return { returnsAt: now + 5_000, outcome: first, label: 'fast match (5s)' };
     case 'slow_match':
-      return { returnsAt: now + 19_000, outcome: pick(), label: 'slow match (19s)' };
+      return { returnsAt: now + 19_000, outcome: first, label: 'slow match (19s)' };
     case 'never':
       return { returnsAt: null, outcome: null, label: 'never returns' };
     case 'no_match':
@@ -249,12 +251,23 @@ export class RoutingService {
     return (JSON.parse(c.expertise) as string[]).includes(expertise);
   }
 
-  /** Contributors who match the expertise and have no active assignment. */
-  private eligibleFor(expertise: string): ContributorRow[] {
-    const busy = this.busyIds();
-    return this.all<ContributorRow>('SELECT * FROM contributors ORDER BY id').filter(
-      (c) => this.hasExpertise(c, expertise) && !busy.has(c.id),
+  /** Contributors who already declined or dropped out of this task. Not re-sent to the engine for it. */
+  private refusedIds(taskId: number): Set<number> {
+    const rows = this.all<{ contributor_id: number }>(
+      `SELECT contributor_id FROM assignments WHERE task_id = ? AND status IN ('declined','failed')`,
+      taskId,
     );
+    return new Set(rows.map((r) => r.contributor_id));
+  }
+
+  /** Contributors who match the expertise, have no active assignment, and haven't refused this task. */
+  private eligibleFor(t: TaskRow): { eligible: ContributorRow[]; excluded: ContributorRow[] } {
+    const busy = this.busyIds();
+    const refused = this.refusedIds(t.id);
+    const free = this.all<ContributorRow>('SELECT * FROM contributors ORDER BY id').filter(
+      (c) => this.hasExpertise(c, t.expertise) && !busy.has(c.id),
+    );
+    return { eligible: free.filter((c) => !refused.has(c.id)), excluded: free.filter((c) => refused.has(c.id)) };
   }
 
   private liveAttempts(taskId: number): AttemptRow[] {
@@ -279,7 +292,7 @@ export class RoutingService {
   }
 
   private sendRequest(t: TaskRow, scenario: Scenario, actor: Actor): AttemptRow | null {
-    const eligible = this.eligibleFor(t.expertise);
+    const { eligible, excluded } = this.eligibleFor(t);
     if (eligible.length === 0) return null;
     const ids = eligible.map((c) => c.id);
     const seq = (this.one<{ m: number | null }>('SELECT MAX(seq) AS m FROM attempts WHERE task_id = ?', t.id)?.m ?? 0) + 1;
@@ -302,6 +315,7 @@ export class RoutingService {
       actor,
       'routing.request_sent',
       `Routing request #${seq} sent with ${ids.length} eligible: ${eligible.map((c) => c.name).join(', ')}` +
+        (excluded.length ? ` (excluded ${excluded.map((c) => c.name).join(', ')}: already refused this task)` : '') +
         (others.length ? `. Request${others.length > 1 ? 's' : ''} ${others.map((a) => '#' + a.seq).join(', ')} still live — first valid answer wins` : ''),
       { attemptSeq: seq, eligible: ids },
     );
@@ -354,7 +368,8 @@ export class RoutingService {
       this.requireState(t, ['routing', 'needs_attention'], 'retry routing for');
       const a = this.sendRequest(t, 'random', 'operator');
       if (!a)
-        throw new DomainError(409, 'no_eligible', `No available contributor has "${t.expertise}" expertise right now. Assign manually or wait.`);
+        throw new DomainError(409, 'no_eligible',
+          `No available contributor with "${t.expertise}" expertise who hasn't already refused this task. Assign manually or wait.`);
       if (t.state === 'needs_attention') this.setState(t, 'routing');
       else this.bump(t);
     });
@@ -557,9 +572,14 @@ export class RoutingService {
   /** Written once per process start so the timeline shows restarts explicitly. */
   recordBoot() {
     this.tx(() => {
-      const pending = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM attempts WHERE status = 'pending'`)!.n;
+      const c = this.one<{ live: number; moot: number }>(
+        `SELECT SUM(abandoned_at IS NULL) AS live, SUM(abandoned_at IS NOT NULL) AS moot FROM attempts WHERE status = 'pending'`,
+      )!;
+      const live = c.live ?? 0;
+      const moot = c.moot ?? 0;
       this.event(null, 'system', 'system.started',
-        `Server started. ${pending} routing request${pending === 1 ? '' : 's'} still outstanding at the engine; tracking resumed.`);
+        `Server started. ${live} live routing request${live === 1 ? '' : 's'} resumed` +
+          (moot ? `; ${moot} abandoned request${moot === 1 ? '' : 's'} still outstanding (answers will be ignored)` : '') + '.');
     });
   }
 
@@ -585,17 +605,7 @@ export class RoutingService {
     const byTask = new Map<number, (typeof assignments)[number]>();
     for (const a of assignments) byTask.set(a.task_id, a); // latest wins
 
-    const taskViews = tasks.map((t) => {
-      const mine = attempts.filter((a) => a.task_id === t.id);
-      const live = mine.filter((a) => a.abandoned_at == null);
-      const asg = byTask.get(t.id);
-      return {
-        ...t,
-        assignee: asg ? { assignmentId: asg.id, contributorId: asg.contributor_id, name: asg.contributor_name, status: asg.status, source: asg.source } : null,
-        liveAttempts: live.map((a) => ({ seq: a.seq, startedAt: a.started_at })),
-        orphanedAttempts: mine.length - live.length, // abandoned but engine may still answer
-      };
-    });
+    const taskViews = tasks.map((t) => toView(t, attempts.filter((a) => a.task_id === t.id), byTask.get(t.id)));
 
     const contributors = this.all<ContributorRow>('SELECT * FROM contributors ORDER BY name').map((c) => {
       const active = assignments.find((a) => a.contributor_id === c.id && ACTIVE_ASSIGNMENT.includes(a.status));
@@ -627,9 +637,25 @@ export class RoutingService {
     );
     const events = this.all<EventRow>('SELECT * FROM events WHERE task_id = ? ORDER BY id', taskId);
     const busy = this.busyIds();
+    const refused = this.refusedIds(taskId);
     const candidates = this.all<ContributorRow>('SELECT * FROM contributors ORDER BY name')
       .filter((c) => this.hasExpertise(c, t.expertise))
-      .map((c) => ({ id: c.id, name: c.name, busy: busy.has(c.id) }));
-    return { now: this.now(), task: t, attempts, assignments, events, candidates };
+      .map((c) => ({ id: c.id, name: c.name, busy: busy.has(c.id), refused: refused.has(c.id) }));
+    const pending = this.all<AttemptRow>(`SELECT * FROM attempts WHERE task_id = ? AND status = 'pending'`, taskId);
+    const current = assignments.filter((a) => a.status !== 'declined' && a.status !== 'failed' && a.status !== 'revoked').at(-1);
+    return { now: this.now(), task: toView(t, pending, current), attempts, assignments, events, candidates };
   }
+}
+
+/** Single list/detail projection of a task, so both endpoints return the same shape. */
+function toView(t: TaskRow, pendingAttempts: AttemptRow[], asg: (AssignmentRow & { contributor_name: string }) | undefined) {
+  const live = pendingAttempts.filter((a) => a.abandoned_at == null);
+  return {
+    ...t,
+    assignee: asg
+      ? { assignmentId: asg.id, contributorId: asg.contributor_id, name: asg.contributor_name, status: asg.status, source: asg.source }
+      : null,
+    liveAttempts: live.map((a) => ({ seq: a.seq, startedAt: a.started_at })),
+    orphanedAttempts: pendingAttempts.length - live.length, // abandoned, but the engine may still answer
+  };
 }
