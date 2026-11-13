@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api, ApiError, type AppState, type TaskDetail, type TaskView } from './client';
 import { dur, clock, STATE_LABEL, REASON_LABEL, routingInfo, urgency } from './format';
 import { TaskPanel } from './TaskPanel';
@@ -212,7 +212,9 @@ export function App() {
         </section>
 
         {selected && detail && detail.task.id === selected && (
-          <TaskPanel d={detail} now={now} normalMaxMs={state.normalMaxMs} internals={internals} run={run} onClose={() => setSelected(null)} />
+          <PanelBoundary key={selected} onClose={() => setSelected(null)}>
+            <TaskPanel d={detail} now={now} normalMaxMs={state.normalMaxMs} internals={internals} run={run} onClose={() => setSelected(null)} />
+          </PanelBoundary>
         )}
       </main>
 
@@ -286,4 +288,23 @@ function TaskRow({ t, now, normalMaxMs, selected, onClick }: { t: TaskView; now:
       <td className="num">{dur(now - t.state_changed_at)}</td>
     </tr>
   );
+}
+
+/** A rendering bug in one task's panel must not take down the whole console. */
+class PanelBoundary extends Component<{ children: ReactNode; onClose: () => void }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <aside className="panel">
+        <div className="situation bad">
+          This task's details failed to render: {this.state.error.message}. The rest of the console is unaffected.
+        </div>
+        <button onClick={this.props.onClose}>Close</button>
+      </aside>
+    );
+  }
 }
