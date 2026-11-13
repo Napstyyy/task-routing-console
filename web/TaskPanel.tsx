@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { api, type TaskDetail, type AttemptView } from './client';
 import { dur, clock, STATE_LABEL, routingInfo } from './format';
 import type { Run } from './App';
+import { Avatar } from './Avatar';
 
 export function TaskPanel({
   d,
@@ -31,12 +32,14 @@ export function TaskPanel({
   const canAssign = canRoute || t.state === 'offered';
   const open = t.state !== 'done' && t.state !== 'cancelled';
   const freeCandidates = d.candidates.filter((c) => !c.busy && c.id !== active?.contributor_id);
+  // Mirror of the server's eligibility rule, so we don't offer a button that can only fail.
+  const routable = d.candidates.some((c) => !c.busy && !c.refused);
 
   return (
     <aside className="panel">
       <div className="panel-head">
         <div>
-          <div className="muted small">
+          <div className="eyebrow">
             T-{t.id} · created {clock(t.created_at)} · {dur(now - t.created_at)} ago
           </div>
           <h2>{t.title}</h2>
@@ -64,7 +67,12 @@ export function TaskPanel({
           <h3>Operator actions</h3>
           <div className="btns">
             {canRoute && (
-              <button onClick={() => act('retry', 'Sent another routing request')} title="Sends a new request. Pending requests stay live; first valid answer wins.">
+              <button
+                className={t.state === 'needs_attention' && routable ? 'primary' : ''}
+                disabled={!routable}
+                onClick={() => act('retry', 'Sent another routing request')}
+                title={routable ? 'Sends a new request. Pending requests stay live; first valid answer wins.' : 'Nobody eligible is free right now'}
+              >
                 {t.state === 'routing' ? 'Send another request' : 'Retry routing'}
               </button>
             )}
@@ -97,7 +105,8 @@ export function TaskPanel({
               >
                 Assign
               </button>
-              {freeCandidates.length === 0 && <small className="warn-text">No free contributor with {t.expertise} expertise.</small>}
+              {freeCandidates.length === 0 && <small className="warn-text">No free contributor with {t.expertise} expertise. Wait for someone to free up, or cancel.</small>}
+              {freeCandidates.length > 0 && !routable && canRoute && <small className="muted">Everyone free has already refused this task, so routing is off. You can still assign one of them manually.</small>}
               {t.state === 'routing' && <small className="muted">Ends routing. Outstanding requests may still answer; those answers will be logged and ignored.</small>}
             </div>
           )}
@@ -107,8 +116,9 @@ export function TaskPanel({
       {active && (
         <section className="sim-box">
           <h3>
-            Simulate {active.contributor_name} <span className="muted small">(contributor side — not an operator action)</span>
+            <Avatar id={active.contributor_id} name={active.contributor_name} size={20} /> Simulate {active.contributor_name}
           </h3>
+          <p className="sim-note">Contributor side. Stands in for the contributor's own app; not an operator action.</p>
           <div className="btns">
             {active.status === 'offered' && (
               <button onClick={() => run(() => api.respond(active.id, 'accept'), `${active.contributor_name} accepted`)}>Accept</button>
@@ -151,10 +161,16 @@ export function TaskPanel({
           <ul className="assignments">
             {d.assignments.map((a) => (
               <li key={a.id}>
-                <span className={`astatus ${a.status}`}>{a.status.replace('_', ' ')}</span>
-                <b>{a.contributor_name}</b>
-                <span className="muted"> · {a.source === 'operator' ? 'manual' : 'engine'} · {clock(a.created_at)}</span>
-                {a.reason && <div className="small muted">“{a.reason}”</div>}
+                <Avatar id={a.contributor_id} name={a.contributor_name} size={28} />
+                <div>
+                  <div>
+                    <b>{a.contributor_name}</b> <span className={`astatus ${a.status}`}>{a.status.replace('_', ' ')}</span>
+                  </div>
+                  <div className="muted small">
+                    {a.source === 'operator' ? 'Assigned manually' : 'Matched by engine'} · {clock(a.created_at)}
+                  </div>
+                  {a.reason && <div className="quote">“{a.reason}”</div>}
+                </div>
               </li>
             ))}
           </ul>
@@ -166,9 +182,10 @@ export function TaskPanel({
         <ol className="timeline">
           {d.events.map((e) => (
             <li key={e.id} className={`ev ${e.actor} ${e.type.replace('.', '-')}`}>
-              <span className="when" title={new Date(e.at).toLocaleString()}>{clock(e.at)}</span>
-              <span className={`actor ${e.actor}`}>{e.actor}</span>
               <span className="msg">{e.message}</span>
+              <span className="when" title={new Date(e.at).toLocaleString()}>
+                {clock(e.at)} · <span className={`actor-text ${e.actor}`}>{e.actor}</span>
+              </span>
             </li>
           ))}
         </ol>

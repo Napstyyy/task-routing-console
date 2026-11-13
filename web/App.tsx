@@ -2,6 +2,7 @@ import { Component, useCallback, useEffect, useMemo, useRef, useState, type Reac
 import { api, ApiError, type AppState, type TaskDetail, type TaskView } from './client';
 import { dur, clock, STATE_LABEL, REASON_LABEL, routingInfo, urgency } from './format';
 import { TaskPanel } from './TaskPanel';
+import { Avatar } from './Avatar';
 import { CreateTask } from './CreateTask';
 
 type Filter = 'action' | 'open' | 'closed' | 'all';
@@ -97,25 +98,31 @@ export function App() {
   const attention = count((t) => t.state === 'needs_attention');
   const free = state.contributors.filter((c) => !c.active).length;
 
+  const kpis: { key: string; label: string; value: string | number; sub?: string; tone?: string; filter?: Filter }[] = [
+    { key: 'att', label: 'Needs attention', value: attention, tone: attention ? 'bad' : '', filter: 'action' },
+    { key: 'route', label: 'Routing', value: count((t) => t.state === 'routing'), sub: overdue ? `${overdue} overdue` : 'none overdue', tone: overdue ? 'warn' : '', filter: 'open' },
+    { key: 'offer', label: 'Awaiting accept', value: count((t) => t.state === 'offered'), filter: 'open' },
+    { key: 'active', label: 'Accepted · in progress', value: count((t) => t.state === 'accepted' || t.state === 'in_progress'), filter: 'open' },
+    { key: 'done', label: 'Done', value: count((t) => t.state === 'done'), filter: 'closed' },
+    { key: 'free', label: 'Contributors free', value: `${free}/${state.contributors.length}` },
+  ];
+
   return (
     <div className="app">
       <header className="top">
         <div className="brand">
-          <span className="logo">◆</span> Routing console
-          {offline && <span className="offline">server unreachable — showing last known state</span>}
-        </div>
-        <div className="stats">
-          <Stat label="Needs attention" value={attention} tone={attention ? 'bad' : undefined} onClick={() => setFilter('action')} />
-          <Stat label="Routing" value={count((t) => t.state === 'routing')} sub={overdue ? `${overdue} overdue` : undefined} tone={overdue ? 'warn' : undefined} />
-          <Stat label="Awaiting accept" value={count((t) => t.state === 'offered')} />
-          <Stat label="Accepted / in progress" value={count((t) => t.state === 'accepted' || t.state === 'in_progress')} />
-          <Stat label="Done" value={count((t) => t.state === 'done')} />
-          <Stat label="Contributors free" value={`${free}/${state.contributors.length}`} />
+          <span className="logo" aria-hidden>
+            <svg viewBox="0 0 20 20" width="18" height="18"><path d="M3 10h6l3-6v12l3-6h2" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          </span>
+          <div>
+            <div className="brand-name">Routing console</div>
+            <div className="brand-sub">Tasks → contributors · live</div>
+          </div>
+          {offline && <span className="offline">Server unreachable — showing last known state</span>}
         </div>
         <div className="top-actions">
-          <button className="primary" onClick={() => setCreating(true)}>+ New task</button>
           <details className="menu">
-            <summary>Demo</summary>
+            <summary>Demo controls</summary>
             <div className="menu-body">
               <button onClick={() => run(() => api.scenarios(), 'Loaded the four use-case tasks')}>Load use-case scenarios</button>
               <label className="check">
@@ -128,82 +135,118 @@ export function App() {
               </button>
             </div>
           </details>
+          <button className="primary" onClick={() => setCreating(true)}>
+            <span aria-hidden>＋</span> New task
+          </button>
         </div>
       </header>
 
       {toast && (
-        <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>
+        <div className={`toast ${toast.kind}`} onClick={() => setToast(null)} role="status">
           {toast.text}
         </div>
       )}
 
+      <div className="kpis">
+        {kpis.map((k) => (
+          <button key={k.key} className={`kpi ${k.tone ?? ''}`} disabled={!k.filter} onClick={() => k.filter && setFilter(k.filter)}>
+            <span className="kpi-label">{k.label}</span>
+            <span className="kpi-value">{k.value}</span>
+            {k.sub && <span className="kpi-sub">{k.sub}</span>}
+          </button>
+        ))}
+      </div>
+
       <main className={selected ? 'with-panel' : ''}>
         <section className="tasks">
-          <div className="tabs">
-            {(['action', 'open', 'closed', 'all'] as Filter[]).map((f) => (
-              <button key={f} className={filter === f ? 'on' : ''} onClick={() => setFilter(f)}>
-                {{ action: 'Needs action', open: 'Open', closed: 'Closed', all: 'All' }[f]}
-                {f === 'action' && attention + overdue > 0 && <span className="pill bad">{attention + overdue}</span>}
-              </button>
-            ))}
-          </div>
-          <table>
-            <thead>
-              <tr>
-                <th>Task</th>
-                <th>Expertise</th>
-                <th>State</th>
-                <th>Routing</th>
-                <th>Assignee</th>
-                <th className="num">Age</th>
-                <th className="num">In state</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tasks.map((t) => (
-                <TaskRow key={t.id} t={t} now={now} normalMaxMs={state.normalMaxMs} selected={t.id === selected} onClick={() => setSelected(t.id === selected ? null : t.id)} />
-              ))}
-              {tasks.length === 0 && (
+          <div className="card table-card">
+            <div className="card-head">
+              <div className="tabs" role="tablist">
+                {(['action', 'open', 'closed', 'all'] as Filter[]).map((f) => (
+                  <button key={f} role="tab" className={filter === f ? 'on' : ''} onClick={() => setFilter(f)}>
+                    {{ action: 'Needs action', open: 'Open', closed: 'Closed', all: 'All' }[f]}
+                    {f === 'action' && attention + overdue > 0 && <span className="pill bad">{attention + overdue}</span>}
+                  </button>
+                ))}
+              </div>
+              <span className="muted small">{tasks.length} task{tasks.length === 1 ? '' : 's'} · most urgent first</span>
+            </div>
+            <table>
+              <colgroup>
+                <col />
+                <col style={{ width: 150 }} />
+                <col style={{ width: 150 }} />
+                <col style={{ width: 170 }} />
+                <col style={{ width: 72 }} />
+                <col style={{ width: 80 }} />
+              </colgroup>
+              <thead>
                 <tr>
-                  <td colSpan={7} className="empty">
-                    {filter === 'action' ? 'Nothing needs you right now.' : 'No tasks here.'}
-                  </td>
+                  <th>Task</th>
+                  <th>State</th>
+                  <th>Routing</th>
+                  <th>Assignee</th>
+                  <th className="num">Age</th>
+                  <th className="num">In state</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {tasks.map((t) => (
+                  <TaskRow key={t.id} t={t} now={now} normalMaxMs={state.normalMaxMs} selected={t.id === selected} onClick={() => setSelected(t.id === selected ? null : t.id)} />
+                ))}
+                {tasks.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="empty">
+                      {filter === 'action' ? '✓ Nothing needs you right now.' : 'No tasks here.'}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
 
           <div className="lower">
             <section className="card">
-              <h3>Contributors</h3>
-              <ul className="contributors">
+              <div className="card-head">
+                <h3>Contributors</h3>
+                <span className="muted small">{free} free · {state.contributors.length - free} busy</span>
+              </div>
+              <ul className="people">
                 {state.contributors.map((c) => (
-                  <li key={c.id}>
-                    <span className={`dot ${c.active ? 'busy' : 'free'}`} title={c.active ? 'busy' : 'free'} />
-                    <span className="cname">{c.name}</span>
-                    <span className="chips">{c.expertise.map((e) => <span key={e} className="chip">{e}</span>)}</span>
-                    <span className="cload">
-                      {c.active ? (
-                        <a onClick={() => setSelected(c.active!.taskId)}>
-                          T-{c.active.taskId} · {c.active.status.replace('_', ' ')}
-                        </a>
-                      ) : (
-                        <span className="muted">free</span>
-                      )}
-                    </span>
+                  <li key={c.id} className={c.active ? 'busy' : 'free'}>
+                    <Avatar id={c.id} name={c.name} />
+                    <div className="person-main">
+                      <div className="person-name">{c.name}</div>
+                      <div className="chips">{c.expertise.map((e) => <span key={e} className="chip">{e}</span>)}</div>
+                    </div>
+                    {c.active ? (
+                      <a className="load busy" onClick={() => setSelected(c.active!.taskId)} title={c.active.title}>
+                        T-{c.active.taskId} · {c.active.status.replace('_', ' ')}
+                      </a>
+                    ) : (
+                      <span className="load free">Free</span>
+                    )}
                   </li>
                 ))}
               </ul>
             </section>
             <section className="card">
-              <h3>Activity</h3>
+              <div className="card-head">
+                <h3>Activity</h3>
+                <span className="legend">
+                  {(['operator', 'engine', 'contributor', 'system'] as const).map((a) => (
+                    <span key={a}><i className={`adot ${a}`} />{a}</span>
+                  ))}
+                </span>
+              </div>
               <ul className="feed">
                 {state.events.map((e) => (
                   <li key={e.id} className={e.task_id ? 'link' : ''} onClick={() => e.task_id && setSelected(e.task_id)}>
+                    <i className={`adot ${e.actor}`} title={e.actor} />
+                    <span className="msg">
+                      {e.task_id && <span className="tid">T-{e.task_id}</span>} {e.message}
+                    </span>
                     <span className="when" title={new Date(e.at).toLocaleString()}>{clock(e.at)}</span>
-                    <span className={`actor ${e.actor}`}>{e.actor}</span>
-                    {e.task_id && <span className="tid">T-{e.task_id}</span>}
-                    <span className="msg">{e.message}</span>
                   </li>
                 ))}
               </ul>
@@ -238,27 +281,22 @@ export function App() {
   );
 }
 
-function Stat({ label, value, sub, tone, onClick }: { label: string; value: number | string; sub?: string; tone?: 'bad' | 'warn'; onClick?: () => void }) {
-  return (
-    <div className={`stat ${tone ?? ''} ${onClick ? 'clickable' : ''}`} onClick={onClick}>
-      <div className="v">{value}</div>
-      <div className="l">{label}</div>
-      {sub && <div className="s">{sub}</div>}
-    </div>
-  );
-}
-
 function TaskRow({ t, now, normalMaxMs, selected, onClick }: { t: TaskView; now: number; normalMaxMs: number; selected: boolean; onClick: () => void }) {
   const r = routingInfo(t, now, normalMaxMs);
+  const hot = r?.overdue || t.state === 'needs_attention';
   return (
-    <tr className={`row ${selected ? 'sel' : ''} ${r?.overdue || t.state === 'needs_attention' ? 'hot' : ''}`} onClick={onClick}>
+    <tr className={`row ${selected ? 'sel' : ''} ${hot ? 'hot' : ''}`} onClick={onClick}>
       <td>
         <div className="title">
-          {t.priority === 'high' && <span className="hi" title="High priority">▲</span>}
-          <span className="tid">T-{t.id}</span> {t.title}
+          {t.priority === 'high' && <span className="hi" title="High priority">HIGH</span>}
+          <span className="tid">T-{t.id}</span>
+          <span className="title-text">{t.title}</span>
+        </div>
+        <div className="subline">
+          <span className="chip">{t.expertise}</span>
+          {t.description && <span className="desc-line">{t.description}</span>}
         </div>
       </td>
-      <td><span className="chip">{t.expertise}</span></td>
       <td>
         <span className={`badge ${t.state}`}>{STATE_LABEL[t.state]}</span>
         {t.reason && t.state === 'needs_attention' && <div className="reason">{REASON_LABEL[t.reason]}</div>}
@@ -267,21 +305,28 @@ function TaskRow({ t, now, normalMaxMs, selected, onClick }: { t: TaskView; now:
         {r ? (
           <span className={r.overdue ? 'overdue' : 'waiting'}>
             <span className="spinner" /> #{r.newest.seq} · {dur(r.elapsed)}
-            {r.overdue && ' · overdue'}
-            {r.live > 1 && <span className="muted"> (+{r.live - 1} live)</span>}
+            {r.overdue && <span className="od-tag">overdue</span>}
+            {r.live > 1 && <div className="muted small">+{r.live - 1} more live</div>}
+          </span>
+        ) : t.orphanedAttempts > 0 ? (
+          <span className="muted small" title="Abandoned requests the engine may still answer. Answers will be ignored.">
+            {t.orphanedAttempts} stray request{t.orphanedAttempts > 1 ? 's' : ''}
           </span>
         ) : (
-          <span className="muted">{t.orphanedAttempts > 0 ? `${t.orphanedAttempts} outstanding, ignored` : '—'}</span>
+          <span className="faint">—</span>
         )}
       </td>
       <td>
         {t.assignee ? (
-          <>
-            {t.assignee.name}
-            {t.assignee.source === 'operator' && <span className="muted" title="Assigned manually by operator"> · manual</span>}
-          </>
+          <span className="assignee">
+            <Avatar id={t.assignee.contributorId} name={t.assignee.name} size={24} />
+            <span>
+              <span className="assignee-name">{t.assignee.name}</span>
+              <span className="muted small">{t.assignee.source === 'operator' ? 'manual' : 'engine'}</span>
+            </span>
+          </span>
         ) : (
-          <span className="muted">—</span>
+          <span className="faint">—</span>
         )}
       </td>
       <td className="num" title={new Date(t.created_at).toLocaleString()}>{dur(now - t.created_at)}</td>

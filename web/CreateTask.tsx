@@ -63,7 +63,9 @@ export function CreateTask({
             <small className={free.length ? 'muted' : 'warn-text'}>
               {matching.length === 0
                 ? 'Nobody has this expertise — the task will need attention immediately.'
-                : `${free.length} of ${matching.length} matching contributors free`}
+                : free.length === 0
+                  ? `All ${matching.length} matching contributors are busy — the task will go straight to Needs attention.`
+                  : `${free.length} of ${matching.length} matching contributors free`}
             </small>
           </label>
           <label>
